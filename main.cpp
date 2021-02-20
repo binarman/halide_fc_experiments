@@ -63,6 +63,10 @@ int main( ) {
 // (m,k) input1(a.k.a. weight) and (n,k) input0(a.k.a. input), which will produce (n,m) output
   Halide::Type input_type(Halide::Type::Float, 32, 1);
   Halide::Type output_type(Halide::Type::Float, 32, 1);
+  Halide::load_plugin("autoschedule_adams2019");
+  Halide::load_plugin("autoschedule_li2018");
+  Halide::load_plugin("autoschedule_mullapudi2016");
+
   for (int *size: sizes)
   {
     int n = size[0];
@@ -70,17 +74,43 @@ int main( ) {
     int m = size[2];
     std::string name = "n" + std::to_string(n) + "m" + std::to_string(m) + "k" + std::to_string(k);
     std::cout << "processing " << name << "\n";
-    std::filesystem::create_directory(name);
     Halide::Var i, j;
     Halide::RDom k_dom(0, k);
     Halide::ImageParam input(input_type, 2);
     Halide::ImageParam weights(input_type, 2);
     Halide::ImageParam bias(output_type, 1);
     Halide::Func fc;
+
     fc(j, i) = bias(j);
     fc(j, i) += input(k, i) * weights(k, j);
+
+    input.set_estimates({{0, k}, {0, n}});
+    bias.set_estimates({{0, m}});
+    weights.set_estimates({{0, k}, {0, m}});
+
+    fc.set_estimates({{0, m}, {0, n}});
+
     Halide::Pipeline pipeline(fc);
-    pipeline.get
+
+    std::string scheduler_name = "Adams2019";
+//    std::string scheduler_name = "Li2018";
+//    std::string scheduler_name = "Mullapudi2016";
+    Halide::Target target;
+    target.arch = Halide::Target::ARM;
+    target.bits = 32;
+    target.os = Halide::Target::Linux;
+    target.set_features({Halide::Target::NoAsserts});
+    Halide::MachineParams machine_params{1, 512*1024, 0.4f};
+    auto scheduler_results = pipeline.auto_schedule(scheduler_name, target, machine_params);
+
+    Halide::Module module = pipeline.compile_to_module({input, weights, bias}, "fc", target);
+    module.set_auto_scheduler_results(scheduler_results);
+
+    std::filesystem::create_directory(name);
+    std::map<Halide::Output, std::string> output_files;
+    output_files[Halide::Output::object] = std::filesystem::path(name) / "fc.o";
+    output_files[Halide::Output::c_header] = std::filesystem::path(name) / "fc.h";
+    module.compile(output_files);
   }
   return 0;
 }
